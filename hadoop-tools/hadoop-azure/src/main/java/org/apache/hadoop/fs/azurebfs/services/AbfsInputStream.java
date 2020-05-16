@@ -32,6 +32,7 @@ import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.StreamCapabilities;
 import org.apache.hadoop.fs.azurebfs.contracts.exceptions.AbfsRestOperationException;
 import org.apache.hadoop.fs.azurebfs.contracts.exceptions.AzureBlobFileSystemException;
+import org.apache.hadoop.fs.azurebfs.utils.CachedSASToken;
 
 import static org.apache.hadoop.util.StringUtils.toLowerCase;
 
@@ -51,6 +52,8 @@ public class AbfsInputStream extends FSInputStream implements CanUnbuffer,
   private final boolean tolerateOobAppends; // whether tolerate Oob Appends
   private final boolean readAheadEnabled; // whether enable readAhead;
 
+  // SAS tokens can be re-used until they expire
+  private CachedSASToken cachedSasToken;
   private byte[] buffer = null;            // will be initialized on first use
 
   private long fCursor = 0;  // cursor of buffer within file - offset of next byte to read from remote server
@@ -61,23 +64,23 @@ public class AbfsInputStream extends FSInputStream implements CanUnbuffer,
   private boolean closed = false;
 
   public AbfsInputStream(
-      final AbfsClient client,
-      final Statistics statistics,
-      final String path,
-      final long contentLength,
-      final int bufferSize,
-      final int readAheadQueueDepth,
-      final boolean tolerateOobAppends,
-      final String eTag) {
+          final AbfsClient client,
+          final Statistics statistics,
+          final String path,
+          final long contentLength,
+          final AbfsInputStreamContext abfsInputStreamContext,
+          final String eTag) {
     this.client = client;
     this.statistics = statistics;
     this.path = path;
     this.contentLength = contentLength;
-    this.bufferSize = bufferSize;
-    this.readAheadQueueDepth = (readAheadQueueDepth >= 0) ? readAheadQueueDepth : Runtime.getRuntime().availableProcessors();
-    this.tolerateOobAppends = tolerateOobAppends;
+    this.bufferSize = abfsInputStreamContext.getReadBufferSize();
+    this.readAheadQueueDepth = abfsInputStreamContext.getReadAheadQueueDepth();
+    this.tolerateOobAppends = abfsInputStreamContext.isTolerateOobAppends();
     this.eTag = eTag;
     this.readAheadEnabled = true;
+    this.cachedSasToken = new CachedSASToken(
+        abfsInputStreamContext.getSasTokenRenewPeriodForStreamsInSeconds());
   }
 
   public String getPath() {
@@ -236,7 +239,8 @@ public class AbfsInputStream extends FSInputStream implements CanUnbuffer,
     final AbfsRestOperation op;
     AbfsPerfTracker tracker = client.getAbfsPerfTracker();
     try (AbfsPerfInfo perfInfo = new AbfsPerfInfo(tracker, "readRemote", "read")) {
-      op = client.read(path, position, b, offset, length, tolerateOobAppends ? "*" : eTag);
+      op = client.read(path, position, b, offset, length, tolerateOobAppends ? "*" : eTag, cachedSasToken.get());
+      cachedSasToken.update(op.getSasToken());
       perfInfo.registerResult(op.getResult()).registerSuccess(true);
       incrementReadOps();
     } catch (AzureBlobFileSystemException ex) {
